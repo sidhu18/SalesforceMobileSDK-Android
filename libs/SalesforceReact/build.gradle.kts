@@ -10,7 +10,7 @@ import org.apache.tools.ant.taskdefs.condition.Os
 val useIntlJsc = false
 
 rootProject.ext["PUBLISH_GROUP_ID"] = "com.salesforce.mobilesdk"
-rootProject.ext["PUBLISH_VERSION"] = "13.1.0"
+rootProject.ext["PUBLISH_VERSION"] = "13.2.0"
 rootProject.ext["PUBLISH_ARTIFACT_ID"] = "SalesforceReact"
 
 plugins {
@@ -22,11 +22,11 @@ plugins {
 
 dependencies {
     api(project(":libs:MobileSync"))
-    api("com.facebook.react:react-android:0.74.7")
-    implementation("androidx.core:core-ktx:1.15.0")
-    androidTestImplementation("androidx.test:runner:1.6.2")
-    androidTestImplementation("androidx.test:rules:1.6.1")
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    api("com.facebook.react:react-android:0.79.3")
+    implementation("androidx.core:core-ktx:1.16.0") // Update requires API 36 compileSdk
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test:rules:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
 
     // JSC from node_modules
@@ -42,6 +42,7 @@ android {
     namespace = "com.salesforce.androidsdk.reactnative"
     testNamespace = "com.salesforce.androidsdk.reactnative.tests"
 
+    //noinspection GradleDependency - Will be upgraded to 36 in Mobile SDK 14.0.  Also, React Native 0.81.5 requests 36.
     compileSdk = 35
 
     defaultConfig {
@@ -111,7 +112,7 @@ android {
         val javaTree = fileTree("${project.projectDir}/build/intermediates/javac/debug") { setExcludes(fileFilter) }
         val kotlinTree = fileTree("${project.projectDir}/build/tmp/kotlin-classes/debug") { setExcludes(fileFilter) }
         classDirectories.setFrom(javaTree, kotlinTree)
-        executionData.setFrom(fileTree("$rootDir/firebase/artifacts/sdcard") { setIncludes(arrayListOf("*.ec")) })
+        executionData.setFrom(fileTree("$rootDir/firebase") { setIncludes(arrayListOf("**/coverage.ec")) })
     }
 }
 
@@ -124,7 +125,7 @@ task<Exec>("buildReactTestBundle") {
             "cmd",
             "/c",
             "node",
-            "node_modules/react-native/local-cli/cli.js",
+            "node_modules/react-native/cli.js",
             "bundle",
             "--platform",
             "android",
@@ -139,8 +140,8 @@ task<Exec>("buildReactTestBundle") {
         )
     } else {
         commandLine(
-            "/usr/local/bin/node",
-            "node_modules/react-native/local-cli/cli.js",
+            "node",
+            "node_modules/react-native/cli.js",
             "bundle",
             "--platform",
             "android",

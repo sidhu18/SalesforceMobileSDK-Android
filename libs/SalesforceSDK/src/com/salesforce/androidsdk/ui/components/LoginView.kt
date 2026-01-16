@@ -29,6 +29,7 @@ package com.salesforce.androidsdk.ui.components
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.res.Configuration
+import android.os.Build
 import android.webkit.WebView
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -36,19 +37,24 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -106,6 +112,7 @@ import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.salesforce.androidsdk.R.string.sf__back_button_content_description
+import com.salesforce.androidsdk.R.string.sf__clear_cache
 import com.salesforce.androidsdk.R.string.sf__clear_cookies
 import com.salesforce.androidsdk.R.string.sf__launch_idp
 import com.salesforce.androidsdk.R.string.sf__loading_indicator
@@ -149,9 +156,10 @@ fun LoginView() {
             titleTextColor = viewModel.titleTextColor ?: viewModel.dynamicHeaderTextColor.value,
             showServerPicker = viewModel.showServerPicker,
             clearCookies = { viewModel.clearCookies() },
+            clearWebViewCache = { viewModel.clearWebViewCache(activity.webView) },
             reloadWebView = { viewModel.reloadWebView() },
             shouldShowBackButton = viewModel.shouldShowBackButton,
-            finish = { activity.finish() },
+            finish = { activity.handleBackBehavior() },
         )
     }
 
@@ -161,7 +169,7 @@ fun LoginView() {
             LoginViewModel.BottomBarButton(
                 stringResource(viewModel.biometricAuthenticationButtonText.intValue)
             ) {
-                viewModel.biometricAuthenticationButtonAction
+                viewModel.biometricAuthenticationButtonAction.value?.invoke() ?: activity.onBioAuthClick()
             }
         } else null
     val idpButton =
@@ -188,6 +196,7 @@ fun LoginView() {
     }
 
     LoginView(
+        dynamicBackgroundColor = viewModel.dynamicBackgroundColor,
         loginUrlData = viewModel.loginUrl,
         topAppBar = topAppBar,
         webView = activity.webView,
@@ -200,6 +209,7 @@ fun LoginView() {
 
 @Composable
 internal fun LoginView(
+    dynamicBackgroundColor: MutableState<Color>,
     loginUrlData: LiveData<String>,
     topAppBar: @Composable () -> Unit,
     webView: WebView,
@@ -215,21 +225,27 @@ internal fun LoginView(
     )
 
     Scaffold(
-        topBar = topAppBar,
         bottomBar = bottomAppBar,
+        contentWindowInsets = WindowInsets.safeDrawing,
+        topBar = topAppBar,
     ) { innerPadding ->
-        if (loading) {
-            loadingIndicator()
-        }
+        Box(modifier = Modifier.fillMaxSize()) {
+            // Load the WebView as a composable
+            AndroidView(
+                modifier = Modifier
+                    .background(dynamicBackgroundColor.value)
+                    .padding(innerPadding)
+                    .consumeWindowInsets(innerPadding)
+                    .applyImePaddingConditionally()
+                    .graphicsLayer(alpha = alpha),
+                factory = { webView },
+                update = { it.loadUrl(loginUrl.value ?: "") },
+            )
 
-        // Load the WebView as a composable
-        AndroidView(
-            modifier = Modifier
-                .padding(innerPadding)
-                .graphicsLayer(alpha = alpha),
-            factory = { webView },
-            update = { it.loadUrl(loginUrl.value ?: "") },
-        )
+            if (loading) {
+                loadingIndicator()
+            }
+        }
 
         if (showServerPicker.value) {
             PickerBottomSheet(PickerStyle.LoginServerPicker)
@@ -246,6 +262,7 @@ internal fun DefaultTopAppBar(
     titleTextColor: Color,
     showServerPicker: MutableState<Boolean>,
     clearCookies: () -> Unit,
+    clearWebViewCache: () -> Unit,
     reloadWebView: () -> Unit,
     shouldShowBackButton: Boolean,
     finish: () -> Unit,
@@ -292,6 +309,11 @@ internal fun DefaultTopAppBar(
                     }
                     MenuItem(stringResource(sf__clear_cookies)) {
                         clearCookies()
+                        reloadWebView()
+                        showMenu = false
+                    }
+                    MenuItem(stringResource(sf__clear_cache)) {
+                        clearWebViewCache()
                         reloadWebView()
                         showMenu = false
                     }
@@ -460,6 +482,15 @@ private tailrec fun Context.getActivity(): FragmentActivity? = when (this) {
     else -> null
 }
 
+@Composable
+private fun Modifier.applyImePaddingConditionally() : Modifier =
+    // TODO:  Remove when min API is > 29
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        windowInsetsPadding(WindowInsets.ime)
+    } else {
+        this
+    }
+
 // Note: the light and dark previews should look the same.
 @Preview
 @Preview("Dark Mode", uiMode = Configuration.UI_MODE_NIGHT_YES, backgroundColor = 0xFF181818)
@@ -474,6 +505,7 @@ private fun AppBarPreview() {
             titleTextColor = Color.Black,
             showServerPicker = remember { mutableStateOf(false) },
             clearCookies = { },
+            clearWebViewCache = { },
             reloadWebView = { },
             shouldShowBackButton = false,
             finish = { },
@@ -493,6 +525,7 @@ private fun AppBarLoadingPreview() {
             titleTextColor = Color.Black,
             showServerPicker = remember { mutableStateOf(false) },
             clearCookies = { },
+            clearWebViewCache = { },
             reloadWebView = { },
             shouldShowBackButton = false,
             finish = { },
@@ -512,6 +545,7 @@ private fun AppBarBackButtonPreview() {
             titleTextColor = Color.Black,
             showServerPicker = remember { mutableStateOf(false) },
             clearCookies = { },
+            clearWebViewCache = { },
             reloadWebView = { },
             shouldShowBackButton = true,
             finish = { },
@@ -531,6 +565,7 @@ private fun AppBarDarkPreview() {
             titleTextColor = Color.White,
             showServerPicker = remember { mutableStateOf(false) },
             clearCookies = { },
+            clearWebViewCache = { },
             reloadWebView = { },
             shouldShowBackButton = true,
             finish = { },
@@ -550,6 +585,7 @@ private fun BlueAppBarPreview() {
             titleTextColor = Color.White,
             showServerPicker = remember { mutableStateOf(false) },
             clearCookies = { },
+            clearWebViewCache = { },
             reloadWebView = { },
             shouldShowBackButton = true,
             finish = { },
@@ -569,6 +605,7 @@ private fun BlueAppBarLoadingPreview() {
             titleTextColor = Color.White,
             showServerPicker = remember { mutableStateOf(false) },
             clearCookies = { },
+            clearWebViewCache = { },
             reloadWebView = { },
             shouldShowBackButton = true,
             finish = { },
@@ -587,6 +624,7 @@ private fun CustomTextAppBarPreview() {
             titleTextColor = Color.White,
             showServerPicker = remember { mutableStateOf(false) },
             clearCookies = { },
+            clearWebViewCache = { },
             reloadWebView = { },
             shouldShowBackButton = false,
             finish = { },
@@ -605,6 +643,7 @@ private fun CustomTextAppBarLoadingPreview() {
             titleTextColor = Color.White,
             showServerPicker = remember { mutableStateOf(false) },
             clearCookies = { },
+            clearWebViewCache = { },
             reloadWebView = { },
             shouldShowBackButton = false,
             finish = { },
@@ -623,6 +662,7 @@ private fun LongCustomTextAppBarPreview() {
             titleTextColor = Color.Black,
             showServerPicker = remember { mutableStateOf(false) },
             clearCookies = { },
+            clearWebViewCache = { },
             reloadWebView = { },
             shouldShowBackButton = true,
             finish = { },

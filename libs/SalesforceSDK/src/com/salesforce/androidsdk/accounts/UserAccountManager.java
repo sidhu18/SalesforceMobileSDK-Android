@@ -504,11 +504,14 @@ public class UserAccountManager {
 
 		final String encryptionKey = SalesforceSDKManager.getEncryptionKey();
 		final String accountName = accountManager.getUserData(account, AccountManager.KEY_ACCOUNT_NAME);
+
+		// Maintenance Note: All account values are nullable by default.  If a value requires a default value when user's of older versions experience access token refresh, provide that here.
 		final String refreshToken = SalesforceSDKManager.decrypt(accountManager.getPassword(account), encryptionKey);
 		final String authToken = decryptUserData(account, AccountManager.KEY_AUTHTOKEN, encryptionKey);
 		final String loginServer = decryptUserData(account, AuthenticatorService.KEY_LOGIN_URL, encryptionKey);
 		final String idUrl = decryptUserData(account, AuthenticatorService.KEY_ID_URL, encryptionKey);
 		final String instanceServer = decryptUserData(account, AuthenticatorService.KEY_INSTANCE_URL, encryptionKey);
+		final String apiInstanceServer = decryptUserData(account, AuthenticatorService.KEY_API_INSTANCE_URL, encryptionKey);
 		final String orgId = decryptUserData(account, AuthenticatorService.KEY_ORG_ID, encryptionKey);
 		final String userId = decryptUserData(account, AuthenticatorService.KEY_USER_ID, encryptionKey);
 		final String username = decryptUserData(account, AuthenticatorService.KEY_USERNAME, encryptionKey);
@@ -534,8 +537,12 @@ public class UserAccountManager {
 		final String cookieSidClient = decryptUserData(account, AuthenticatorService.KEY_COOKIE_SID_CLIENT, encryptionKey);
 		final String sidCookieName = decryptUserData(account, AuthenticatorService.KEY_SID_COOKIE_NAME, encryptionKey);
 		final String clientId = decryptUserData(account, AuthenticatorService.KEY_CLIENT_ID, encryptionKey);
+
 		final String parentSid = decryptUserData(account, AuthenticatorService.KEY_PARENT_SID, encryptionKey);
 		final String tokenFormat = decryptUserData(account, AuthenticatorService.KEY_TOKEN_FORMAT, encryptionKey);
+		final String beaconChildConsumerKey = decryptUserData(account, AuthenticatorService.KEY_BEACON_CHILD_CONSUMER_KEY, encryptionKey);
+		final String beaconChildConsumerSecret = decryptUserData(account, AuthenticatorService.KEY_BEACON_CHILD_CONSUMER_SECRET, encryptionKey);
+		final String scope = decryptUserData(account, AuthenticatorService.KEY_SCOPE, encryptionKey);
 
 		Map<String, String> additionalOauthValues = null;
 		List<String> additionalOauthKeys = SalesforceSDKManager.getInstance().getAdditionalOauthKeys();
@@ -560,6 +567,7 @@ public class UserAccountManager {
 					.loginServer(loginServer)
 					.idUrl(idUrl)
 					.instanceServer(instanceServer)
+					.apiInstanceServer(apiInstanceServer)
 					.orgId(orgId)
 					.userId(userId)
 					.username(username)
@@ -587,6 +595,9 @@ public class UserAccountManager {
 					.clientId(clientId)
 					.parentSid(parentSid)
 					.tokenFormat(tokenFormat)
+					.beaconChildConsumerKey(beaconChildConsumerKey)
+					.beaconChildConsumerSecret(beaconChildConsumerSecret)
+					.scope(scope)
 					.additionalOauthValues(additionalOauthValues)
 					.build();
 		}
@@ -706,6 +717,7 @@ public class UserAccountManager {
 		extras.putString(AuthenticatorService.KEY_LOGIN_URL, SalesforceSDKManager.encrypt(userAccount.getLoginServer(), encryptionKey));
 		extras.putString(AuthenticatorService.KEY_ID_URL, SalesforceSDKManager.encrypt(userAccount.getIdUrl(), encryptionKey));
 		extras.putString(AuthenticatorService.KEY_INSTANCE_URL, SalesforceSDKManager.encrypt(userAccount.getInstanceServer(), encryptionKey));
+		extras.putString(AuthenticatorService.KEY_API_INSTANCE_URL, SalesforceSDKManager.encrypt(userAccount.getApiInstanceServer(), encryptionKey));
 		extras.putString(AuthenticatorService.KEY_CLIENT_ID, SalesforceSDKManager.encrypt(userAccount.getClientId(), encryptionKey));
 		extras.putString(AuthenticatorService.KEY_ORG_ID, SalesforceSDKManager.encrypt(userAccount.getOrgId(), encryptionKey));
 		extras.putString(AuthenticatorService.KEY_USER_ID, SalesforceSDKManager.encrypt(userAccount.getUserId(), encryptionKey));
@@ -733,6 +745,9 @@ public class UserAccountManager {
 		extras.putString(AuthenticatorService.KEY_SID_COOKIE_NAME, SalesforceSDKManager.encrypt(userAccount.getSidCookieName(), encryptionKey));
 		extras.putString(AuthenticatorService.KEY_PARENT_SID, SalesforceSDKManager.encrypt(userAccount.getParentSid(), encryptionKey));
 		extras.putString(AuthenticatorService.KEY_TOKEN_FORMAT, SalesforceSDKManager.encrypt(userAccount.getTokenFormat(), encryptionKey));
+		extras.putString(AuthenticatorService.KEY_BEACON_CHILD_CONSUMER_KEY, SalesforceSDKManager.encrypt(userAccount.getBeaconChildConsumerKey(), encryptionKey));
+		extras.putString(AuthenticatorService.KEY_BEACON_CHILD_CONSUMER_SECRET, SalesforceSDKManager.encrypt(userAccount.getBeaconChildConsumerSecret(), encryptionKey));
+		extras.putString(AuthenticatorService.KEY_SCOPE, SalesforceSDKManager.encrypt(userAccount.getScope(), encryptionKey));
 
 		final List<String> additionalOauthKeys = SalesforceSDKManager.getInstance().getAdditionalOauthKeys();
 		if (additionalOauthKeys != null && !additionalOauthKeys.isEmpty()) {

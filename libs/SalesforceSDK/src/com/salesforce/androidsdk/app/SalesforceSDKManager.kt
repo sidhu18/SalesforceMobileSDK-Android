@@ -57,6 +57,8 @@ import android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
 import android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
 import android.webkit.CookieManager
 import android.webkit.URLUtil.isHttpsUrl
+import androidx.annotation.VisibleForTesting
+import androidx.annotation.VisibleForTesting.Companion.PROTECTED
 import androidx.compose.material3.ColorScheme
 import androidx.compose.runtime.Composable
 import androidx.core.content.ContextCompat.RECEIVER_EXPORTED
@@ -90,7 +92,6 @@ import com.salesforce.androidsdk.app.SalesforceSDKManager.Theme.SYSTEM_DEFAULT
 import com.salesforce.androidsdk.auth.AuthenticatorService.KEY_INSTANCE_URL
 import com.salesforce.androidsdk.auth.HttpAccess
 import com.salesforce.androidsdk.auth.HttpAccess.DEFAULT
-import com.salesforce.androidsdk.auth.JwtAccessToken
 import com.salesforce.androidsdk.auth.NativeLoginManager
 import com.salesforce.androidsdk.auth.OAuth2.LogoutReason
 import com.salesforce.androidsdk.auth.OAuth2.LogoutReason.UNKNOWN
@@ -104,8 +105,11 @@ import com.salesforce.androidsdk.config.BootConfig.getBootConfig
 import com.salesforce.androidsdk.config.LoginServerManager
 import com.salesforce.androidsdk.config.LoginServerManager.PRODUCTION_LOGIN_URL
 import com.salesforce.androidsdk.config.LoginServerManager.SANDBOX_LOGIN_URL
+import com.salesforce.androidsdk.config.LoginServerManager.WELCOME_LOGIN_URL
+import com.salesforce.androidsdk.config.OAuthConfig
 import com.salesforce.androidsdk.config.RuntimeConfig.ConfigKey.IDPAppPackageName
 import com.salesforce.androidsdk.config.RuntimeConfig.getRuntimeConfig
+import com.salesforce.androidsdk.developer.support.DevSupportInfo
 import com.salesforce.androidsdk.developer.support.notifications.local.ShowDeveloperSupportNotifier.Companion.BROADCAST_INTENT_ACTION_SHOW_DEVELOPER_SUPPORT
 import com.salesforce.androidsdk.developer.support.notifications.local.ShowDeveloperSupportNotifier.Companion.hideDeveloperSupportNotification
 import com.salesforce.androidsdk.developer.support.notifications.local.ShowDeveloperSupportNotifier.Companion.showDeveloperSupportNotification
@@ -129,6 +133,7 @@ import com.salesforce.androidsdk.security.ScreenLockManager
 import com.salesforce.androidsdk.ui.AccountSwitcherActivity
 import com.salesforce.androidsdk.ui.DevInfoActivity
 import com.salesforce.androidsdk.ui.LoginActivity
+import com.salesforce.androidsdk.ui.LoginOptionsActivity
 import com.salesforce.androidsdk.ui.LoginViewModel
 import com.salesforce.androidsdk.ui.theme.sfDarkColors
 import com.salesforce.androidsdk.ui.theme.sfLightColors
@@ -142,13 +147,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers.Default
 import kotlinx.coroutines.Dispatchers.Main
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import org.json.JSONObject
 import java.lang.String.CASE_INSENSITIVE_ORDER
 import java.net.URI
-import java.text.SimpleDateFormat
-import java.util.Locale
 import java.util.Locale.US
 import java.util.SortedSet
 import java.util.UUID.randomUUID
@@ -195,13 +197,13 @@ open class SalesforceSDKManager protected constructor(
      *
      * @return The class for the main activity.
      */
-    val mainActivityClass: Class<out Activity>
+    val mainActivityClass: Class<out Activity> = mainActivity
 
     /**
      * Null or an authenticated Activity for private use when developer support
      * is enabled.
      */
-    private var authenticatedActivityForDeveloperSupport: Activity? = null
+    private var activityForDeveloperSupport: Activity? = null
 
     /**
      * Null or the Android Activity lifecycle callbacks object registered when
@@ -228,6 +230,16 @@ open class SalesforceSDKManager protected constructor(
      * visual customization without overriding LoginActivity.
      */
     var loginViewModelFactory = LoginViewModel.Factory
+
+    /**
+     * Asynchronously retrieves the app config for the specified login host.  If not set or null is
+     * returned the values found in the BootConfig file will be used for all servers.
+     */
+    var appConfigForLoginHost: suspend (server: String) -> OAuthConfig? = {
+        OAuthConfig(getBootConfig(appContext))
+    }
+
+    internal var debugOverrideAppConfig: OAuthConfig? = null
 
     /** The class for the account switcher activity */
     var accountSwitcherActivityClass = AccountSwitcherActivity::class.java
@@ -324,6 +336,15 @@ open class SalesforceSDKManager protected constructor(
     var additionalOauthKeys: List<String>? = null
 
     /**
+     * Determines if the authentication web view's cookies will be cleared after
+     * authentication.  The default behavior is true to protect against re-use
+     * of authentication related cookies and duplication authentication action.
+     * Only apps the specifically require persistent cookies should set this to
+     * false.
+     */
+    var clearCookiesAfterLogin = true
+
+    /**
      * The login brand. In the following example, "<brand>" should be set here.
      * https://community.force.com/services/oauth2/authorize/<brand>?response_type=code&...
      *
@@ -339,11 +360,13 @@ open class SalesforceSDKManager protected constructor(
      */
     @set:Synchronized
     open var isBrowserLoginEnabled = false
-        protected set
+        @VisibleForTesting(otherwise = PROTECTED)
+        set
 
     /** Optionally enables browser session sharing */
     var isShareBrowserSessionEnabled = false
-        private set
+        @VisibleForTesting
+        set
 
     /**
      * The custom tab browser to use during advanced authentication.
@@ -368,11 +391,20 @@ open class SalesforceSDKManager protected constructor(
     var useWebServerAuthentication = true
 
     /**
+     * Whether or not the app supports welcome discovery.  This should only be
+     * enabled if the connected app is supported.
+     */
+    var supportsWelcomeDiscovery = false
+
+    /**
      * Optionally, enables the hybrid authentication flow.  Defaults to true
      */
     @get:JvmName("shouldUseHybridAuthentication")
     @set:Synchronized
     var useHybridAuthentication = true
+
+    // Used to ensure the webview is reloaded when Dev Menu Login Options are changed.
+    internal var loginDevMenuReload = false
 
     /**
      * The regular expression pattern used to detect "Use Custom Domain" input
@@ -415,6 +447,7 @@ open class SalesforceSDKManager protected constructor(
         return _lightColorScheme ?: sfLightColors().also { _lightColorScheme = it }
     }
 
+    @Suppress("unused")
     fun setLightColorScheme(value: ColorScheme) {
         _lightColorScheme = value
     }
@@ -430,6 +463,7 @@ open class SalesforceSDKManager protected constructor(
         return _darkColorScheme ?: sfDarkColors().also { _darkColorScheme = it }
     }
 
+    @Suppress("unused")
     fun setDarkColorScheme(value: ColorScheme) {
         _darkColorScheme = value
     }
@@ -514,7 +548,6 @@ open class SalesforceSDKManager protected constructor(
 
     /** Initializer */
     init {
-        mainActivityClass = mainActivity
         features = ConcurrentSkipListSet(CASE_INSENSITIVE_ORDER)
 
         /*
@@ -598,7 +631,7 @@ open class SalesforceSDKManager protected constructor(
         communityUrl: String,
         reCaptchaSiteKeyId: String? = null,
         googleCloudProjectId: String? = null,
-        isReCaptchaEnterprise: Boolean = false
+        isReCaptchaEnterprise: Boolean = false,
     ): NativeLoginManagerInterface {
         registerUsedAppFeature(FEATURE_NATIVE_LOGIN)
         nativeLoginManager = NativeLoginManager(
@@ -723,17 +756,15 @@ open class SalesforceSDKManager protected constructor(
      * Cleans cached credentials and data.
      *
      * @param frontActivity The front activity
-     * @param account The user account
+     * @param userAccount The user account
      * @param shouldDismissActivity Dismisses the current activity if true; does
      * nothing otherwise
      */
     private fun cleanUp(
         frontActivity: Activity?,
-        account: Account?,
+        userAccount: UserAccount?,
         shouldDismissActivity: Boolean
     ) {
-        val userAccount = UserAccountManager.getInstance().buildUserAccount(account)
-
         // Clean up within this process
         cleanUp(userAccount)
 
@@ -806,9 +837,6 @@ open class SalesforceSDKManager protected constructor(
      */
     private fun startSwitcherActivityIfRequired() {
 
-        // Clear cookies
-        CookieManager.getInstance().removeAllCookies(null)
-
         /*
          * If the number of accounts remaining is 0, show the login page.
          *
@@ -853,10 +881,10 @@ open class SalesforceSDKManager protected constructor(
     ) {
 
         // Assign the authenticated Activity
-        authenticatedActivityForDeveloperSupport = authenticatedActivity
+        activityForDeveloperSupport = authenticatedActivity
 
         // Display or hide the show developer support notification
-        when (userAccountManager.currentAccount == null || authenticatedActivityForDeveloperSupport == null) {
+        when (activityForDeveloperSupport == null) {
             true -> hideDeveloperSupportNotification(lifecycleActivity)
             else -> showDeveloperSupportNotification(lifecycleActivity)
         }
@@ -1075,14 +1103,19 @@ open class SalesforceSDKManager protected constructor(
         frontActivity: Activity?,
         logoutReason: LogoutReason,
     ) {
+        val userAccount = UserAccountManager.getInstance().buildUserAccount(account)
         cleanUp(
             frontActivity,
-            account,
+            userAccount,
             showLoginPage
         )
         clientMgr.removeAccount(account)
         isLoggingOut = false
-        notifyLogoutComplete(showLoginPage, logoutReason)
+
+        // Clear cookies to ensure those used during previous log in will not be re-used to log the user in again.
+        CookieManager.getInstance().removeAllCookies(null)
+
+        notifyLogoutComplete(showLoginPage, logoutReason, userAccount)
 
         // Revoke the existing refresh token
         if (shouldLogoutWhenTokenRevoked() && refreshToken != null) {
@@ -1105,9 +1138,9 @@ open class SalesforceSDKManager protected constructor(
      * Sends the logout complete event.
      * @param showLoginPage When true, shows the login page
      */
-    private fun notifyLogoutComplete(showLoginPage: Boolean, logoutReason: LogoutReason) {
+    private fun notifyLogoutComplete(showLoginPage: Boolean, logoutReason: LogoutReason, userAccount: UserAccount?) {
         EventsObservable.get().notifyEvent(LogoutComplete, logoutReason)
-        sendLogoutCompleteIntent(logoutReason)
+        sendLogoutCompleteIntent(logoutReason, userAccount)
         if (showLoginPage) {
             startSwitcherActivityIfRequired()
         }
@@ -1187,7 +1220,16 @@ open class SalesforceSDKManager protected constructor(
     open val isHybrid = false
 
     /** The authentication account type, which should match authenticator.xml */
-    val accountType = appContext.getString(account_type)
+    val accountType: String by lazy {
+        val type = appContext.getString(account_type)
+        if (type == "com.salesforce.androidsdk") {
+            // TODO: Turn this logline into an assert in 14.0
+            e(TAG, "No app specific account type found.  To ensure users " +
+                    "can login override the \"account_type\" value in your strings.xml.")
+        }
+
+        return@lazy type
+    }
 
     override fun toString() =
         """
@@ -1266,148 +1308,129 @@ open class SalesforceSDKManager protected constructor(
      * features for
      * @return map of title to dev actions handlers to display
      */
-    protected open fun getDevActions(
-        frontActivity: Activity
-    ) = mapOf(
-
-        "Show dev info" to object : DevActionHandler {
-            override fun onSelected() {
-                frontActivity.startActivity(
-                    Intent(
-                        frontActivity,
-                        DevInfoActivity::class.java
+    @VisibleForTesting(otherwise = PROTECTED)
+    open fun getDevActions(frontActivity: Activity): Map<String, DevActionHandler> {
+        val actions = mutableMapOf(
+            "Show dev info" to object : DevActionHandler {
+                override fun onSelected() {
+                    frontActivity.startActivity(
+                        Intent(
+                            frontActivity,
+                            DevInfoActivity::class.java
+                        )
                     )
-                )
-            }
-        },
+                }
+            },
+            "Login Options" to object : DevActionHandler {
+                override fun onSelected() {
+                    frontActivity.startActivity(
+                        Intent(
+                            frontActivity,
+                            LoginOptionsActivity::class.java
+                        )
+                    )
+                }
+            },
+        )
 
-        "Logout" to object : DevActionHandler {
-            override fun onSelected() {
-                logout(frontActivity = frontActivity, reason = LogoutReason.USER_LOGOUT)
+        // Do not show Logout or Switch User options in Dev menu on the Login screen or if there is no user(s).
+        if (frontActivity !is LoginActivity && userAccountManager.cachedCurrentUser != null) {
+            actions["Logout"] = object : DevActionHandler {
+                override fun onSelected() {
+                    logout(frontActivity = frontActivity, reason = LogoutReason.USER_LOGOUT)
+                }
             }
-        },
 
-        "Switch user" to object : DevActionHandler {
-            override fun onSelected() {
-                appContext.startActivity(Intent(
-                    appContext,
-                    accountSwitcherActivityClass
-                ).apply {
-                    flags = FLAG_ACTIVITY_NEW_TASK
-                })
+            actions["Switch User"] = object : DevActionHandler {
+                override fun onSelected() {
+                    appContext.startActivity(Intent(
+                        appContext,
+                        accountSwitcherActivityClass
+                    ).apply {
+                        flags = FLAG_ACTIVITY_NEW_TASK
+                    })
+                }
             }
-        })
+        }
+
+        return actions
+    }
 
     /** Information to display in the developer support dialog */
+    @Deprecated(
+        "Will be removed in Mobile SDK 14.0, please use the new data class representation.",
+        ReplaceWith("devSupportInfo")
+    )
     open val devSupportInfos: List<String>
         get() = mutableListOf(
             "SDK Version", SDK_VERSION,
             "App Type", appType,
             "User Agent", userAgent,
             "Use Web Server Authentication", "$useWebServerAuthentication",
+            "Use Hybrid Authentication Token", "$useHybridAuthentication",
+            "Support Welcome Discovery", "$supportsWelcomeDiscovery",
             "Browser Login Enabled", "$isBrowserLoginEnabled",
             "IDP Enabled", "$isIDPLoginFlowEnabled",
             "Identity Provider", "$isIdentityProvider",
-            "Current User", usersToString(userAccountManager.cachedCurrentUser),
-            "Access Token Expiration", accessTokenExpiration(),
-            "Authenticated Users", usersToString(userAccountManager.authenticatedUsers)
+            "Authenticated Users", userAccountManager.authenticatedUsers?.joinToString(separator = ",\n") {
+                "${it.displayName} (${it.username})"
+            } ?: "none",
         ).apply {
-            addAll(
-                getDevInfosFor(
-                    getBootConfig(appContext).asJSON(),
-                    "BootConfig"
-                )
-            )
-            val runtimeConfig = getRuntimeConfig(appContext)
-            addAll(
-                listOf(
-                    "Managed?",
-                    "${runtimeConfig.isManagedApp}"
-                )
-            )
-            if (runtimeConfig.isManagedApp) {
-                addAll(
-                    getDevInfosFor(
-                        runtimeConfig.asJSON(),
-                        "Managed Pref"
-                    )
-                )
+            val bootConfigValues = DevSupportInfo.parseBootConfigInfo(getBootConfig(appContext))
+            addAll(bootConfigValues.flatMap { listOf(it.first, it.second) })
+
+            val currentUserValues = DevSupportInfo.parseUserInfoSection(userAccountManager.cachedCurrentUser)
+            currentUserValues?.let { (_, values) ->
+                addAll(values.flatMap { listOf(it.first, it.second) })
             }
+
+            val runtimeConfigValues = DevSupportInfo.parseRuntimeConfig(getRuntimeConfig(appContext))
+            addAll(runtimeConfigValues.flatMap { listOf(it.first, it.second) })
         }
 
-    private fun accessTokenExpiration(): String {
-        val currentUSer = userAccountManager.cachedCurrentUser
-        var expiration = "Unknown"
-
-        if (currentUSer.tokenFormat == "jwt") {
-            val jwtAccessToken = JwtAccessToken(currentUSer.authToken)
-            val expirationDate = jwtAccessToken.expirationDate()
-            if (expirationDate != null) {
-                val dateFormatter = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
-                expiration = dateFormatter.format(expirationDate)
-            }
-        }
-
-        return expiration
-    }
-
-
-    /**
-     * Information to display in the developer support dialog for a specified
-     * JSON configuration.
-     * @param jsonObject JSON for an object such as boot or runtime
-     * configuration
-     * @return The developer support dialog information
-     */
-    private fun getDevInfosFor(
-        jsonObject: JSONObject?,
-        keyPrefix: String
-    ): List<String> {
-        val devInfos: MutableList<String> = ArrayList()
-        val jsonObjectResolved = jsonObject ?: return devInfos
-        val keys = jsonObjectResolved.keys()
-        while (keys.hasNext()) {
-            val key = keys.next()
-            devInfos.add("$keyPrefix - $key")
-            jsonObjectResolved.opt(key)?.toString()?.let {
-                devInfos.add(it)
-            }
-        }
-        return devInfos
-    }
-
-    /**
-     * Returns a string representation of the provided users.
-     * @param userAccounts The user accounts
-     * @return A string representation of the provided users.
-     */
-    private fun usersToString(
-        vararg userAccounts: UserAccount
-    ) = join(
-        ", ",
-        userAccounts.map { userAccount ->
-            userAccount.accountName
-        }
-    )
-
-    /**
-     * Returns a string representation of the provided users.
-     * @param userAccounts The user accounts
-     * @return A string representation of the provided users.
-     */
-    private fun usersToString(
-        userAccounts: List<UserAccount>?
-    ) = userAccounts?.toTypedArray<UserAccount>()?.let {
-        usersToString(*it)
-    } ?: ""
+//    val devSupportInfo: DevSupportInfo
+//        get() {
+//            val userList: String? = userAccountManager.authenticatedUsers?.joinToString(separator = ",\n") {
+//                "${it.displayName} (${it.username})"
+//            }
+//            val basicInfo = listOf(
+//                "SDK Version" to SDK_VERSION,
+//                "App Type" to appType,
+//                "User Agent" to userAgent,
+//                "Authenticated Users" to (userList ?: "None"),
+//            )
+//            val authConfig = listOf(
+//                "Use Web Server Authentication" to "$useWebServerAuthentication",
+//                "Use Hybrid Authentication Token" to "$useHybridAuthentication",
+//                "Support Welcome Discovery" to "$supportsWelcomeDiscovery",
+//                "Browser Login Enabled" to "$isBrowserLoginEnabled",
+//                "IDP Enabled" to "$isIDPLoginFlowEnabled",
+//                "Identity Provider" to "$isIdentityProvider",
+//            )
+//
+//            return DevSupportInfo(
+//                basicInfo,
+//                authConfig,
+//                getBootConfig(appContext),
+//                userAccountManager.cachedCurrentUser,
+//                getRuntimeConfig(appContext),
+//            )
+//        }
+//
+//  TODO: Replace devSupportInfo with the above implementation when devSupportInfos is removed in 14.0.
+    open val devSupportInfo: DevSupportInfo
+        get() = DevSupportInfo.createFromLegacyDevInfos(devSupportInfos)
 
     /** Sends the logout completed intent */
-    private fun sendLogoutCompleteIntent(logoutReason: LogoutReason) =
+    private fun sendLogoutCompleteIntent(logoutReason: LogoutReason, userAccount: UserAccount?) =
         appContext.sendBroadcast(Intent(
             LOGOUT_COMPLETE_INTENT_ACTION
         ).apply {
             setPackage(appContext.packageName)
             putExtra(LOGOUT_REASON_KEY, logoutReason.toString())
+            userAccount?.let { userAccount ->
+                putExtra(USER_ACCOUNT_KEY, userAccount.toBundle())
+            }
         })
 
     /**
@@ -1425,7 +1448,7 @@ open class SalesforceSDKManager protected constructor(
             )
             userAccount?.let { userAccount ->
                 putExtra(
-                    USER_ACCOUNT,
+                    USER_ACCOUNT_KEY,
                     userAccount.toBundle()
                 )
             }
@@ -1438,7 +1461,7 @@ open class SalesforceSDKManager protected constructor(
             intent: Intent
         ) {
             if (intent.action == CLEANUP_INTENT_ACTION && intent.getStringExtra(PROCESS_ID_KEY) != PROCESS_ID) {
-                cleanUp(intent.getBundleExtra(USER_ACCOUNT)?.let { bundle ->
+                cleanUp(intent.getBundleExtra(USER_ACCOUNT_KEY)?.let { bundle ->
                     UserAccount(bundle)
                 })
             }
@@ -1558,7 +1581,7 @@ open class SalesforceSDKManager protected constructor(
         (biometricAuthenticationManager as? BiometricAuthenticationManager)?.onAppBackgrounded()
 
         // Hide the Salesforce Mobile SDK "Show Developer Support" notification
-        authenticatedActivityForDeveloperSupport?.let {
+        activityForDeveloperSupport?.let {
             hideDeveloperSupportNotification(it)
         }
     }
@@ -1581,9 +1604,9 @@ open class SalesforceSDKManager protected constructor(
         }
 
         // Display the Salesforce Mobile SDK "Show Developer Support" notification
-        if (userAccountManager.currentAccount != null && authenticatedActivityForDeveloperSupport != null) {
+        if (activityForDeveloperSupport != null) {
             showDeveloperSupportNotification(
-                authenticatedActivityForDeveloperSupport
+                activityForDeveloperSupport
             )
         }
     }
@@ -1599,7 +1622,7 @@ open class SalesforceSDKManager protected constructor(
         protected var INSTANCE: SalesforceSDKManager? = null
 
         /** The current version of this SDK */
-        const val SDK_VERSION = "13.1.0.dev"
+        const val SDK_VERSION = "13.2.0.dev"
 
         /**
          * An intent action meant for instances of Salesforce SDK manager
@@ -1615,7 +1638,7 @@ open class SalesforceSDKManager protected constructor(
         private val PROCESS_ID = randomUUID().toString()
 
         /** The user account key for broadcast intents  */
-        private const val USER_ACCOUNT = "userAccount"
+        internal const val USER_ACCOUNT_KEY = "userAccount"
 
         /** An intent action indicating logout was completed */
         const val LOGOUT_COMPLETE_INTENT_ACTION = "com.salesforce.LOGOUT_COMPLETE"
@@ -1814,19 +1837,10 @@ open class SalesforceSDKManager protected constructor(
                 }
 
                 override fun onActivityResumed(activity: Activity) {
-                    when (activity.javaClass) {
-                        salesforceSDKManager.loginActivityClass ->
-                            salesforceSDKManager.updateDeveloperSupportForActivityLifecycle(
-                                authenticatedActivity = null,
-                                lifecycleActivity = activity
-                            )
-
-                        else ->
-                            salesforceSDKManager.updateDeveloperSupportForActivityLifecycle(
-                                authenticatedActivity = activity,
-                                lifecycleActivity = activity
-                            )
-                    }
+                    salesforceSDKManager.updateDeveloperSupportForActivityLifecycle(
+                        authenticatedActivity = activity,
+                        lifecycleActivity = activity,
+                    )
                 }
 
                 override fun onActivityPaused(activity: Activity) {
@@ -1852,7 +1866,7 @@ open class SalesforceSDKManager protected constructor(
             val showDeveloperSupportBroadcastIntentReceiver: BroadcastReceiver = object : BroadcastReceiver() {
                 override fun onReceive(context: Context, intent: Intent) {
                     salesforceSDKManager.showDevSupportDialog(
-                        salesforceSDKManager.authenticatedActivityForDeveloperSupport
+                        salesforceSDKManager.activityForDeveloperSupport
                     )
                 }
             }
@@ -1900,36 +1914,35 @@ open class SalesforceSDKManager protected constructor(
     /**
      * Fetches the authentication configuration, if required.
      *
+     * @param httpAccess The HTTP access to use for API integration.  Defaults
+     * to null to use the default HTTP access.  This parameter is intended for
+     * testing purposes only and should not be used in release builds.
      * @param completion An optional function to invoke at the end of the action
      */
-    fun fetchAuthenticationConfiguration(
-        completion: (() -> Unit)? = null
+    internal fun fetchAuthenticationConfiguration(
+        httpAccess: HttpAccess? = null,
+        completion: (() -> Unit),
     ) = CoroutineScope(Default).launch {
-        runCatching {
-            // If this takes more than five seconds it can cause Android's application not responding report.
-            withTimeout(5000L) {
-                val loginServer = loginServerManager.selectedLoginServer?.url?.trim { it <= ' ' } ?: return@withTimeout
+        // If this takes more than five seconds it can cause Android's application not responding report.
+        withTimeoutOrNull(5000L) {
+            val loginServer = loginServerManager.selectedLoginServer.url.trim()
+            if (loginServer == PRODUCTION_LOGIN_URL || loginServer == WELCOME_LOGIN_URL || loginServer == SANDBOX_LOGIN_URL || !isHttpsUrl(loginServer) || loginServer.toHttpUrlOrNull() == null) {
+                setBrowserLoginEnabled(
+                    browserLoginEnabled = false,
+                    shareBrowserSessionEnabled = false
+                )
 
-                if (loginServer == PRODUCTION_LOGIN_URL || loginServer == SANDBOX_LOGIN_URL || !isHttpsUrl(loginServer) || loginServer.toHttpUrlOrNull() == null) {
-                    setBrowserLoginEnabled(
-                        browserLoginEnabled = false,
-                        shareBrowserSessionEnabled = false
-                    )
-
-                    return@withTimeout
-                }
-
-                getMyDomainAuthConfig(loginServer).let { authConfig ->
-                    setBrowserLoginEnabled(
-                        browserLoginEnabled = authConfig?.isBrowserLoginEnabled ?: false,
-                        shareBrowserSessionEnabled = authConfig?.isShareBrowserSessionEnabled ?: false
-                    )
-                }
+                return@withTimeoutOrNull
             }
-        }.onFailure { e ->
-            e(TAG, "Exception occurred while fetching authentication configuration", e)
+
+            getMyDomainAuthConfig(httpAccess, loginServer).let { authConfig ->
+                setBrowserLoginEnabled(
+                    browserLoginEnabled = authConfig?.isBrowserLoginEnabled ?: false,
+                    shareBrowserSessionEnabled = authConfig?.isShareBrowserSessionEnabled ?: false
+                )
+            }
         }
 
-        completion?.invoke()
+        completion.invoke()
     }
 }

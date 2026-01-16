@@ -94,8 +94,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -122,7 +123,9 @@ import com.salesforce.androidsdk.R.string.sf__server_url_default_custom_label
 import com.salesforce.androidsdk.R.string.sf__server_url_default_custom_url
 import com.salesforce.androidsdk.R.string.sf__server_url_save
 import com.salesforce.androidsdk.accounts.UserAccount
+import com.salesforce.androidsdk.accounts.UserAccountManager
 import com.salesforce.androidsdk.app.SalesforceSDKManager
+import com.salesforce.androidsdk.config.LoginServerManager
 import com.salesforce.androidsdk.config.LoginServerManager.LoginServer
 import com.salesforce.androidsdk.ui.LoginViewModel
 import com.salesforce.androidsdk.ui.theme.hintTextColor
@@ -144,15 +147,28 @@ internal const val TEXT_SELECTION_ALPHA = 0.2f
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PickerBottomSheet(pickerStyle: PickerStyle) {
-    val viewModel: LoginViewModel = viewModel(factory = SalesforceSDKManager.getInstance().loginViewModelFactory)
-    val loginServerManager = SalesforceSDKManager.getInstance().loginServerManager
-    val userAccountManager = SalesforceSDKManager.getInstance().userAccountManager
-    val activity = LocalContext.current.getActivity()
+    TestablePickerBottomSheet(
+        pickerStyle = pickerStyle,
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+@VisibleForTesting
+internal fun TestablePickerBottomSheet(
+    pickerStyle: PickerStyle,
+    viewModel: LoginViewModel = viewModel(factory = SalesforceSDKManager.getInstance().loginViewModelFactory),
+    loginServerManager: LoginServerManager = SalesforceSDKManager.getInstance().loginServerManager,
+    userAccountManager: UserAccountManager = SalesforceSDKManager.getInstance().userAccountManager,
+    activity: FragmentActivity? = LocalContext.current.getActivity(),
+) {
     val onNewLoginServerSelected = { newSelectedServer: Any?, closePicker: Boolean ->
         if (newSelectedServer != null && newSelectedServer is LoginServer) {
             viewModel.showServerPicker.value = !closePicker
-            viewModel.loading.value = true
-            SalesforceSDKManager.getInstance().loginServerManager.selectedLoginServer = newSelectedServer
+            if (newSelectedServer != SalesforceSDKManager.getInstance().loginServerManager.selectedLoginServer) {
+                viewModel.loading.value = true
+                SalesforceSDKManager.getInstance().loginServerManager.selectedLoginServer = newSelectedServer
+            }
         }
     }
     val onLoginServerCancel = { viewModel.showServerPicker.value = false }
@@ -190,8 +206,9 @@ fun PickerBottomSheet(pickerStyle: PickerStyle) {
     when (pickerStyle) {
         PickerStyle.LoginServerPicker ->
             PickerBottomSheet(
-                pickerStyle,
-                sheetState,
+                addButtonVisible = viewModel.serverPickerAddConnectionButtonVisible,
+                pickerStyle = pickerStyle,
+                sheetState = sheetState,
                 list = loginServerManager.loginServers,
                 selectedListItem = loginServerManager.selectedLoginServer,
                 onItemSelected = onNewLoginServerSelected,
@@ -202,8 +219,8 @@ fun PickerBottomSheet(pickerStyle: PickerStyle) {
 
         PickerStyle.UserAccountPicker ->
             PickerBottomSheet(
-                pickerStyle,
-                sheetState,
+                pickerStyle = pickerStyle,
+                sheetState = sheetState,
                 list = userAccountManager.authenticatedUsers,
                 selectedListItem = userAccountManager.currentUser,
                 onItemSelected = onUserAccountSelected,
@@ -224,6 +241,7 @@ internal fun PickerBottomSheet(
     sheetState: SheetState,
     list: List<Any>,
     selectedListItem: Any?,
+    addButtonVisible: Boolean = true,
     onItemSelected: (Any?, Boolean) -> Unit,
     getValidServer: ((String) -> String?)? = null,
     addNewLoginServer: ((String, String) -> Unit)? = null,
@@ -391,13 +409,11 @@ internal fun PickerBottomSheet(
                                                     if (listItem is UserAccount) {
                                                         UserAccountListItem(
                                                             displayName = listItem.displayName,
-                                                            loginServer = listItem.loginServer,
+                                                            loginServer = listItem.communityUrl ?: listItem.instanceServer,
                                                             selected = selected,
                                                             onItemSelected = { onItemSelected(listItem, true) },
-                                                            profilePhoto = listItem.profilePhoto?.let {
-                                                                painterResource(
-                                                                    it.generationId
-                                                                )
+                                                            profilePhoto = listItem.profilePhoto?.let { bitmap ->
+                                                                BitmapPainter(bitmap.asImageBitmap())
                                                             },
                                                         )
                                                         /*
@@ -411,10 +427,8 @@ internal fun PickerBottomSheet(
                                                             loginServer = listItem.loginServer,
                                                             selected = selected,
                                                             onItemSelected = { onItemSelected(listItem, true) },
-                                                            profilePhoto = listItem.profilePhoto?.let {
-                                                                painterResource(
-                                                                    it.generationId
-                                                                )
+                                                            profilePhoto = listItem.profilePhoto?.let { bitmap ->
+                                                                BitmapPainter(bitmap.asImageBitmap())
                                                             },
                                                         )
                                                     }
@@ -428,7 +442,7 @@ internal fun PickerBottomSheet(
                                         )
 
                                         // Add New Connection/Account Button
-                                        if (listItem == mutableList.last()) {
+                                        if (listItem == mutableList.last() && addButtonVisible) {
                                             OutlinedButton(
                                                 onClick = {
                                                     when (pickerStyle) {

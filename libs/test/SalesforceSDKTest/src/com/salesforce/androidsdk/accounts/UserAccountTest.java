@@ -49,6 +49,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import okhttp3.MediaType;
+import okhttp3.Protocol;
+import okhttp3.Request;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
+
 /**
  * Tests for {@link UserAccount}
  */
@@ -63,6 +69,7 @@ public class UserAccountTest {
     public static final String TEST_USERNAME = "test_username";
     public static final String TEST_LOGIN_URL = "https://test.salesforce.com";
     public static final String TEST_INSTANCE_URL = "https://cs1.salesforce.com";
+    public static final String TEST_API_INSTANCE_URL = "https://api.salesforce.com";
     public static final String TEST_IDENTITY_URL = "https://test.salesforce.com/" + TEST_ORG_ID + "/" + TEST_USER_ID;
     public static final String TEST_COMMUNITY_URL = "https://mobilesdk.cs1.my.salesforce.com";
     public static final String TEST_AUTH_TOKEN = "test_auth_token";
@@ -95,12 +102,16 @@ public class UserAccountTest {
     public static final String TEST_CLIENT_ID = "test-client-id";
     public static final String TEST_PARENT_SID = "test-parent-sid";
     public static final String TEST_TOKEN_FORMAT = "test-token-format";
+    public static final String TEST_BEACON_CHILD_CONSUMER_KEY = "test-beacon-child-consumer-key";
+    public static final String TEST_BEACON_CHILD_CONSUMER_SECRET = "test-beacon-child-consumer-secret";
+    public static final String TEST_SCOPE = "api web openid refresh_token";
 
     // other user
     public static final String TEST_ORG_ID_2 = "test_org_id_2";
     public static final String TEST_USER_ID_2 = "test_user_id_2";
     public static final String TEST_ACCOUNT_NAME_2 = "test_username_2 (https://cs1.salesforce.com) (SalesforceSDKTest)";
     public static final String TEST_USERNAME_2 = "test_username_2";
+    public static final String TEST_SCOPE_2 = "api web refresh_token sfap_api";
 
 
     private EventsListenerQueue eq;
@@ -114,6 +125,23 @@ public class UserAccountTest {
         final Bundle actual = account.toBundle(createAdditionalOauthKeys());
         final Bundle expected = createTestAccountBundle();
         BundleTestHelper.checkSameBundle("UserAccount bundles do not match", expected, actual);
+    }
+
+
+    @Test
+    public void testHasScope() {
+        UserAccount account = createTestAccount();
+        Assert.assertTrue(account.hasScope("api"));
+        Assert.assertTrue(account.hasScope("web"));
+        Assert.assertTrue(account.hasScope("openid"));
+        Assert.assertTrue(account.hasScope("refresh_token"));
+        Assert.assertFalse(account.hasScope("unknown"));
+
+        UserAccount emptyScope = UserAccountBuilder.getInstance()
+                .populateFromUserAccount(account)
+                .scope("")
+                .build();
+        Assert.assertFalse(emptyScope.hasScope("api"));
     }
 
     /**
@@ -149,20 +177,38 @@ public class UserAccountTest {
 
     /**
      * Tests populating account from token end point response and id response
+     * Simulating user agent flow
      */
     @Test
-    public void testPopulateFromTokenEndpointAndIdService() throws JSONException {
-        OAuth2.TokenEndpointResponse tr = createTokenEndpointResponse();
+    public void testPopulateFromTokenEndpointAndIdServiceLikeUserAgentFlow() throws JSONException {
         OAuth2.IdServiceResponse id = createIdServiceResponse();
-        UserAccount account = UserAccountBuilder.getInstance()
-                .populateFromTokenEndpointResponse(tr)
+        OAuth2.TokenEndpointResponse trUserAgentFlow = createTokenEndpointResponseLikeUserAgentFlow();
+        checkTestAccount(UserAccountBuilder.getInstance()
+                .populateFromTokenEndpointResponse(trUserAgentFlow)
                 .populateFromIdServiceResponse(id)
                 .accountName(TEST_ACCOUNT_NAME)
                 .loginServer(TEST_LOGIN_URL)
                 .nativeLogin(TEST_NATIVE_LOGIN)
                 .clientId(TEST_CLIENT_ID)
-                .build();
-        checkTestAccount(account);
+                .build(), false /* no beacon child fields during user agent flow */);
+    }
+
+    /**
+     * Tests populating account from token end point response and id response
+     * Simulating web server flow
+     */
+    @Test
+    public void testPopulateFromTokenEndpointAndIdServiceLikeWebServerFlow() throws JSONException {
+        OAuth2.IdServiceResponse id = createIdServiceResponse();
+        OAuth2.TokenEndpointResponse trWebServerFlow = createTokenEndpointResponseLikeWebServerFlow();
+        checkTestAccount(UserAccountBuilder.getInstance()
+                .populateFromTokenEndpointResponse(trWebServerFlow)
+                .populateFromIdServiceResponse(id)
+                .accountName(TEST_ACCOUNT_NAME)
+                .loginServer(TEST_LOGIN_URL)
+                .nativeLogin(TEST_NATIVE_LOGIN)
+                .clientId(TEST_CLIENT_ID)
+                .build(), true /* beacon child fields expected with web server flow */);
     }
 
     /**
@@ -176,8 +222,29 @@ public class UserAccountTest {
                 .orgId(TEST_ORG_ID_2)
                 .username(TEST_USERNAME_2)
                 .accountName(TEST_ACCOUNT_NAME_2)
+                .scope(TEST_SCOPE_2)
                 .build();
         checkOtherTestAccount(otherUserAccount);
+    }
+
+    @Test
+    public void testGetClientIdForRefresh() {
+        UserAccount userWithBeaconChildKey = createTestAccount();
+        Assert.assertEquals("Beacon child consumer key should match", TEST_BEACON_CHILD_CONSUMER_KEY, userWithBeaconChildKey.getBeaconChildConsumerKey());
+        Assert.assertEquals("Beacon child consumer secret should match", TEST_BEACON_CHILD_CONSUMER_SECRET, userWithBeaconChildKey.getBeaconChildConsumerSecret());
+        Assert.assertEquals("Client id should match", TEST_CLIENT_ID, userWithBeaconChildKey.getClientId());
+        Assert.assertEquals("Client id for refresh should be beacon child client id", TEST_BEACON_CHILD_CONSUMER_KEY, userWithBeaconChildKey.getClientIdForRefresh());
+
+        UserAccount userWithoutBeaconChildKey = UserAccountBuilder.getInstance()
+                .populateFromUserAccount(userWithBeaconChildKey)
+                .beaconChildConsumerKey(null)
+                .beaconChildConsumerSecret(null)
+                .build();
+
+        Assert.assertNull("Beacon child consumer key should be null", userWithoutBeaconChildKey.getBeaconChildConsumerKey());
+        Assert.assertNull("Beacon child consumer secret should be null", userWithoutBeaconChildKey.getBeaconChildConsumerSecret());
+        Assert.assertEquals("Client id should match", TEST_CLIENT_ID, userWithoutBeaconChildKey.getClientId());
+        Assert.assertEquals("Client id for refresh should be client id", TEST_CLIENT_ID, userWithoutBeaconChildKey.getClientIdForRefresh());
     }
 
     /**
@@ -329,6 +396,7 @@ public class UserAccountTest {
         object.put(UserAccount.LOGIN_SERVER, TEST_LOGIN_URL);
         object.put(UserAccount.ID_URL, TEST_IDENTITY_URL);
         object.put(UserAccount.INSTANCE_SERVER, TEST_INSTANCE_URL);
+        object.put(UserAccount.API_INSTANCE_SERVER, TEST_API_INSTANCE_URL);
         object.put(UserAccount.ORG_ID, TEST_ORG_ID);
         object.put(UserAccount.USER_ID, TEST_USER_ID);
         object.put(UserAccount.USERNAME, TEST_USERNAME);
@@ -355,6 +423,9 @@ public class UserAccountTest {
         object.put(UserAccount.SID_COOKIE_NAME, TEST_SID_COOKIE_NAME);
         object.put(UserAccount.PARENT_SID, TEST_PARENT_SID);
         object.put(UserAccount.TOKEN_FORMAT, TEST_TOKEN_FORMAT);
+        object.put(UserAccount.SCOPE, TEST_SCOPE);
+        object.put(UserAccount.BEACON_CHILD_CONSUMER_KEY, TEST_BEACON_CHILD_CONSUMER_KEY);
+        object.put(UserAccount.BEACON_CHILD_CONSUMER_SECRET, TEST_BEACON_CHILD_CONSUMER_SECRET);
         object = MapUtil.addMapToJSONObject(createAdditionalOauthValues(), createAdditionalOauthKeys(), object);
         return object;
     }
@@ -371,6 +442,7 @@ public class UserAccountTest {
         object.putString(UserAccount.LOGIN_SERVER, TEST_LOGIN_URL);
         object.putString(UserAccount.ID_URL, TEST_IDENTITY_URL);
         object.putString(UserAccount.INSTANCE_SERVER, TEST_INSTANCE_URL);
+        object.putString(UserAccount.API_INSTANCE_SERVER, TEST_API_INSTANCE_URL);
         object.putString(UserAccount.ORG_ID, TEST_ORG_ID);
         object.putString(UserAccount.USER_ID, TEST_USER_ID);
         object.putString(UserAccount.USERNAME, TEST_USERNAME);
@@ -399,6 +471,9 @@ public class UserAccountTest {
         object.putString(UserAccount.CLIENT_ID, TEST_CLIENT_ID);
         object.putString(UserAccount.PARENT_SID, TEST_PARENT_SID);
         object.putString(UserAccount.TOKEN_FORMAT, TEST_TOKEN_FORMAT);
+        object.putString(UserAccount.BEACON_CHILD_CONSUMER_KEY, TEST_BEACON_CHILD_CONSUMER_KEY);
+        object.putString(UserAccount.BEACON_CHILD_CONSUMER_SECRET, TEST_BEACON_CHILD_CONSUMER_SECRET);
+        object.putString(UserAccount.SCOPE, TEST_SCOPE);
         object = MapUtil.addMapToBundle(createAdditionalOauthValues(), createAdditionalOauthKeys(), object);
         return object;
     }
@@ -413,6 +488,7 @@ public class UserAccountTest {
                 .loginServer(TEST_LOGIN_URL)
                 .idUrl(TEST_IDENTITY_URL)
                 .instanceServer(TEST_INSTANCE_URL)
+                .apiInstanceServer(TEST_API_INSTANCE_URL)
                 .orgId(TEST_ORG_ID)
                 .userId(TEST_USER_ID)
                 .username(TEST_USERNAME)
@@ -441,6 +517,9 @@ public class UserAccountTest {
                 .clientId(TEST_CLIENT_ID)
                 .parentSid(TEST_PARENT_SID)
                 .tokenFormat(TEST_TOKEN_FORMAT)
+                .beaconChildConsumerKey(TEST_BEACON_CHILD_CONSUMER_KEY)
+                .beaconChildConsumerSecret(TEST_BEACON_CHILD_CONSUMER_SECRET)
+                .scope(TEST_SCOPE)
                 .additionalOauthValues(createAdditionalOauthValues())
                 .build();
     }
@@ -455,6 +534,7 @@ public class UserAccountTest {
                 .orgId(TEST_ORG_ID_2)
                 .username(TEST_USERNAME_2)
                 .accountName(TEST_ACCOUNT_NAME_2)
+                .scope(TEST_SCOPE_2)
                 .build();
     }
 
@@ -463,11 +543,21 @@ public class UserAccountTest {
      * @param account
      */
     void checkTestAccount(UserAccount account) {
+        checkTestAccount(account, true);
+    }
+
+    /**
+     * Check that the account passed has the test values
+     * @param account
+     * @param expectBeaconChildFields
+     */
+    void checkTestAccount(UserAccount account, boolean expectBeaconChildFields) {
         Assert.assertEquals("Auth token should match", TEST_AUTH_TOKEN, account.getAuthToken());
         Assert.assertEquals("Refresh token should match", TEST_REFRESH_TOKEN, account.getRefreshToken());
         Assert.assertEquals("Login server URL should match", TEST_LOGIN_URL, account.getLoginServer());
         Assert.assertEquals("Identity URL should match", TEST_IDENTITY_URL, account.getIdUrl());
         Assert.assertEquals("Instance URL should match", TEST_INSTANCE_URL, account.getInstanceServer());
+        Assert.assertEquals("API instance URL should match", TEST_API_INSTANCE_URL, account.getApiInstanceServer());
         Assert.assertEquals("Org ID should match", TEST_ORG_ID, account.getOrgId());
         Assert.assertEquals("User ID should match", TEST_USER_ID, account.getUserId());
         Assert.assertEquals("User name should match", TEST_USERNAME, account.getUsername());
@@ -494,7 +584,14 @@ public class UserAccountTest {
         Assert.assertEquals("Sid cookie name should match", TEST_SID_COOKIE_NAME, account.getSidCookieName());
         Assert.assertEquals("Parent sid should match", TEST_PARENT_SID, account.getParentSid());
         Assert.assertEquals("Token format should match", TEST_TOKEN_FORMAT, account.getTokenFormat());
-
+        if (expectBeaconChildFields) {
+            Assert.assertEquals("Beacon child consumer key should match", TEST_BEACON_CHILD_CONSUMER_KEY, account.getBeaconChildConsumerKey());
+            Assert.assertEquals("Beacon child consumer secret should match", TEST_BEACON_CHILD_CONSUMER_SECRET, account.getBeaconChildConsumerSecret());
+        } else {
+            Assert.assertNull("Beacon child consumer key should be null", account.getBeaconChildConsumerKey());
+            Assert.assertNull("Beacon child consumer secret should be null", account.getBeaconChildConsumerSecret());
+        }
+        Assert.assertEquals("Scope should match", TEST_SCOPE, account.getScope());
         Assert.assertEquals("Additional OAuth values should match", createAdditionalOauthValues(), account.getAdditionalOauthValues());
     }
 
@@ -508,6 +605,7 @@ public class UserAccountTest {
         Assert.assertEquals("Login server URL should match", TEST_LOGIN_URL, account.getLoginServer());
         Assert.assertEquals("Identity URL should match", TEST_IDENTITY_URL, account.getIdUrl());
         Assert.assertEquals("Instance URL should match", TEST_INSTANCE_URL, account.getInstanceServer());
+        Assert.assertEquals("API instance URL should match", TEST_API_INSTANCE_URL, account.getApiInstanceServer());
         Assert.assertEquals("Org ID should match", TEST_ORG_ID_2, account.getOrgId());
         Assert.assertEquals("User ID should match", TEST_USER_ID_2, account.getUserId());
         Assert.assertEquals("User name should match", TEST_USERNAME_2, account.getUsername());
@@ -534,6 +632,9 @@ public class UserAccountTest {
         Assert.assertEquals("Sid cookie name should match", TEST_SID_COOKIE_NAME, account.getSidCookieName());
         Assert.assertEquals("Parent sid should match", TEST_PARENT_SID, account.getParentSid());
         Assert.assertEquals("Token format should match", TEST_TOKEN_FORMAT, account.getTokenFormat());
+        Assert.assertEquals("Beacon child consumer key should match", TEST_BEACON_CHILD_CONSUMER_KEY, account.getBeaconChildConsumerKey());
+        Assert.assertEquals("Beacon child consumer secret should match", TEST_BEACON_CHILD_CONSUMER_SECRET, account.getBeaconChildConsumerSecret());
+        Assert.assertEquals("Scope should match", TEST_SCOPE_2, account.getScope());
         Assert.assertEquals("Additional OAuth values should match", createAdditionalOauthValues(), account.getAdditionalOauthValues());
     }
 
@@ -547,12 +648,37 @@ public class UserAccountTest {
         return new ArrayList<>(Collections.singletonList(TEST_CUSTOM_KEY));
     }
 
-    private OAuth2.TokenEndpointResponse createTokenEndpointResponse() {
+    private OAuth2.TokenEndpointResponse createTokenEndpointResponseLikeUserAgentFlow() {
+        Map<String, String> params = createTokenEndpointParams();
+        return new OAuth2.TokenEndpointResponse(params, createAdditionalOauthKeys());
+    }
+
+    private OAuth2.TokenEndpointResponse createTokenEndpointResponseLikeWebServerFlow() {
+        Map<String, String> params = createTokenEndpointParams();
+        params.put("beacon_child_consumer_key", TEST_BEACON_CHILD_CONSUMER_KEY);
+        params.put("beacon_child_consumer_secret", TEST_BEACON_CHILD_CONSUMER_SECRET);
+        JSONObject responseJson = new JSONObject(params);
+        MediaType mediaType = MediaType.parse("application/json");
+        ResponseBody responseBody = ResponseBody.create(responseJson.toString(), mediaType);
+
+        Response response =  new Response.Builder()
+                .code(200) // HTTP 200 OK
+                .message("OK")
+                .protocol(Protocol.HTTP_1_1)
+                .request(new Request.Builder().url("https://something.salesforce.com").build())
+                .body(responseBody)
+                .build();
+
+        return new OAuth2.TokenEndpointResponse(response, createAdditionalOauthKeys());
+    }
+
+    private Map<String, String> createTokenEndpointParams() {
         Map<String, String> params = new HashMap<>();
 
         params.put("access_token", TEST_AUTH_TOKEN);
         params.put("refresh_token", TEST_REFRESH_TOKEN);
         params.put("instance_url", TEST_INSTANCE_URL);
+        params.put("api_instance_url", TEST_API_INSTANCE_URL);
         params.put("id", TEST_IDENTITY_URL);
         params.put("sfdc_community_id", TEST_COMMUNITY_ID);
         params.put("sfdc_community_url", TEST_COMMUNITY_URL);
@@ -569,8 +695,9 @@ public class UserAccountTest {
         params.put("sidCookieName", TEST_SID_COOKIE_NAME);
         params.put("parent_sid", TEST_PARENT_SID);
         params.put("token_format", TEST_TOKEN_FORMAT);
+        params.put("scope", TEST_SCOPE);
 
-        return new OAuth2.TokenEndpointResponse(params, createAdditionalOauthKeys());
+        return params;
     }
 
     private OAuth2.IdServiceResponse createIdServiceResponse() throws JSONException {
